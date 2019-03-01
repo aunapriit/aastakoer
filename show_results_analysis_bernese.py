@@ -32,6 +32,8 @@ df['judge_country'] = df['judge_country'].str.replace('Eesti','Estonia').str.spl
 df.insert(loc=3, column='gender', value=df['klass'], allow_duplicates=True) # copy column with new name to divide dog class and gender
 df['klass'] = df['klass'].str.replace('E ','').str.replace('I ', '') # remove gender info from class
 df['gender'] = df['gender'].str.split(" ").str[0] # replace strings in column and select first words as gender (E or I)
+df['dogcode'] =  df['koer'].str.split(' ', 1).str[0] # separate dog code to a new column
+df['koer'] = df['koer'].str.split(' ', 1).str[1] # separate dog name and leave the doge code out 
 
 # delete inferior classes (repeating show results Kasv, Paar and Järg) and babies and puppies results
 df = df[df.klass != 'Kasv'] # delete rows with value 'Kasv'
@@ -118,6 +120,8 @@ df_judges = df_judges.groupby('judge_country')['kohtunik'].count().reset_index(n
 # Finding the missing values
 missingvalues = df.isnull().sum()
 
+# convert data to
+#df.koer = df.koer.astype(float).fillna(0.0)
 
 """ End of preprocessing, start of CatBoost implementation"""
 # make new dataframe with needed only data
@@ -201,14 +205,21 @@ sns.catplot(x='kohtunik', y='grade', data=df_v, jitter=True);
 risttabel = pd.crosstab(df_v.koer, df_v.kohtunik, values=df_v.grade, aggfunc='mean').round(0)
 
 # matplotlib vizualisation
-names = df_v['kohtunik']
-values = df_v['grade']
+colors = np.random.rand(91,91,4).reshape(-1,4)[0:len(values),:]
 fig, ax = plt.subplots()
 ax.plot(names, values, label="dogs")
-ax.scatter(names, values)
+ax.scatter(names, values, c=colors)
 ax.legend()
+plt.ylabel('Tulemus')
+plt.xlabel('Kohtunik')
+plt.xticks(rotation=90)
 plt.show()
 
+# export for javascript vizualisation
+df_exp = pd.DataFrame()
+df_exp['koer'] = df['koer']
+df_exp['grade'] = df['grade']
+df_exp.to_csv("data.csv", index=False)
 
 """ Below is version for KModes clustering
 
