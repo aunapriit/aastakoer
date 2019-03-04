@@ -5,7 +5,7 @@ Small analysis of Estonian kennelshows using Bernese mountain dogs data from ken
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, CatBoostClassifier, Pool, cv
 from sklearn.model_selection import train_test_split
 import seaborn as sns
 
@@ -22,7 +22,6 @@ df = pd.concat(frames, join='inner').reset_index(drop=True)
 del frames, df_2019, df_2018, df_2017, df_2016, df_2015, df_2014, df_2013
 
 # general preprocessing
-np.where(pd.isnull(df)) # check for missing values
 df['tulemused'] = df['tulemused'].fillna(value='0') # fill empty values
 df["koer"].value_counts() # check dogs' number of records
 df = df[df.groupby('koer').koer.transform(len) > 1] # leave out dogs that have only one appearance
@@ -32,8 +31,8 @@ df['judge_country'] = df['judge_country'].str.replace('Eesti','Estonia').str.spl
 df.insert(loc=3, column='gender', value=df['klass'], allow_duplicates=True) # copy column with new name to divide dog class and gender
 df['klass'] = df['klass'].str.replace('E ','').str.replace('I ', '') # remove gender info from class
 df['gender'] = df['gender'].str.split(" ").str[0] # replace strings in column and select first words as gender (E or I)
-df['dogcode'] =  df['koer'].str.split(' ', 1).str[0] # separate dog code to a new column
-df['koer'] = df['koer'].str.split(' ', 1).str[1] # separate dog name and leave the doge code out 
+df['dogcode'] =  df['koer'].str.replace('LŠVK ', 'LŠVK').str.replace('-','').str.replace('/','').str.replace('.','').str.split(' ', 1).str[0] # separate dog code to a new column
+df['koer'] = df['koer'].str.split(' ', 1).str[1] # separate dog name and leave the doge code out
 
 # delete inferior classes (repeating show results Kasv, Paar and Järg) and babies and puppies results
 df = df[df.klass != 'Kasv'] # delete rows with value 'Kasv'
@@ -45,6 +44,12 @@ df = df[df.klass != 'Kuts'] # delete rows with value 'Kuts'
 # remove some spaces from results and transform string to a list of results
 df['tulemused'] = df['tulemused'].str.replace('SP 1','SP1').str.replace('SP 2','SP2').str.replace('SP 3','SP3').str.replace('SP 4','SP4').str.replace('VL 1','VL1').str.replace('VL 2','VL2').str.replace('VL 3','VL3').str.replace('1 EAH','1EAH').str.replace('2 EAH','2EAH').str.replace('3 EAH','3EAH').str.replace('4 EAH','4EAH').str.replace('Jun SERT','JunSERT')
 df["tulemused"] = df["tulemused"].str.split(' ')
+
+# set data types to category
+df['koer'] = df['koer'].astype('category')
+df['klass'] = df['klass'].astype('category')
+df['gender'] = df['gender'].astype('category')
+df['kohtunik'] = df['kohtunik'].astype('category')
 
 # count amounts of participants per class and add column with that information to the class data frame
 df_dogs_per_show = df.groupby('naitus').size().reset_index(name='dogs_per_show')
@@ -69,10 +74,9 @@ All dogs (open class - dogs of Ava,Ch, Noo, Jun, Vet classes):
 1 - EVH
 0 - 0
 """
-# formatted show results as numeric and categorical variables
-num_gradelist = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] # numeric grades
-cat_gradelist = ['Zero', 'EivõiHinnata', 'Rahuldav', 'Hea', 'VägaHea', 'SuurePärane', 'SuurePärane4', 'SuurePärane3', 'SuurePärane2', 'SuurePärane1', 'SertKandidaat', 'Parim4', 'Parim3', 'Parim2', 'VastasSugupooleParim', 'TõuParim'] # categorical grades
-gradelist = num_gradelist # decide which to use, numeric or categorical
+# formatted show results as numeric and categorical variables - uncomment the one that will be used
+gradelist = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15] # numeric grades
+#gradelist = ['muhvigi', 'ei_voi_hinnata', 'rahuldav', 'hea', 'vaga_hea', 'suureparane', 'suureparane_4', 'suureparane_3', 'suureparane_2', 'suureparane_1', 'sert_kandidaat', 'parim_4', 'parim_3', 'parim_2', 'vastassugupoole_parim', 'tou_parim'] # categorical grades
     
 # Remap dog result as one grade
 def calculate_grade(row):
@@ -108,6 +112,7 @@ def calculate_grade(row):
 df["grade"] = gradelist[0]
 df['grade'] = df.apply(calculate_grade, axis=1)
 
+""" Small analysis of results """
 # sum dog results and sort values by grade
 res_open = df.groupby(['koer', 'gender'])['grade'].sum().reset_index()
 res_open = res_open.sort_values('grade', ascending=False).reset_index(drop=True)
@@ -117,87 +122,46 @@ df_judges = df.drop_duplicates('naitus') # as there is judge per breed and show,
 df_judges = df_judges.groupby('judge_country')['kohtunik'].count().reset_index(name='nr_of_judges') # get sum of judges per country
 #df_judges.to_csv('judge_countries.csv')
 
+""" End of preprocessing, start of CatBoost implementation"""
 # Finding the missing values
 missingvalues = df.isnull().sum()
-
-# convert data to
-#df.koer = df.koer.astype(float).fillna(0.0)
-
-""" End of preprocessing, start of CatBoost implementation"""
-# make new dataframe with needed only data
-df_cb = df.filter(['koer', 'gender', 'kohtunik', 'dogs_per_show', 'grade'], axis=1)
-
-# make training and test set
-train, test = train_test_split(df_cb, train_size=0.8)
+df.grade = df.grade.astype(float).fillna(0.0) # convert data type
 
 # Creating a training set for modeling and validation set to check model performance
-X = train.drop(['grade'], axis=1)
-y = train.grade
-X_train, X_validation, y_train, y_validation = train_test_split(X, y, train_size=0.7, random_state=1234)
-
-y_valid_pred = 0*y
-y_test_pred = 0
+X = df.drop(['naitus', 'koeralink', 'tulemused', 'judge_country', 'dogcode', 'grade'], axis=1)
+y = df.grade
+X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.8, random_state=1234)
 
 # Look at the data type of variables 
 X.dtypes
 categorical_features_indices = np.where(X.dtypes != np.float)[0]
+X_train.info()
 
-# building model
-model=CatBoostRegressor(iterations=53, depth=3, learning_rate=0.1, loss_function='RMSE')
-model.fit(X_train, y_train,cat_features=categorical_features_indices,eval_set=(X_validation, y_validation),plot=True)
+# regression model
+#model=CatBoostRegressor(iterations=55, random_seed=63, learning_rate=0.5, loss_function='Logloss', custom_loss='AUC')
+#model.fit(X_train, y_train, cat_features=categorical_features_indices,eval_set=(X_test, y_test),plot=True)
 
+# classification model
+model = CatBoostClassifier(iterations=5, random_seed=63, learning_rate=0.5, loss_function='Logloss', custom_loss='AUC')
+model.fit(X_train, y_train, cat_features=categorical_features_indices, eval_set=(X_test,y_test),plot=True)
+pool = Pool(X_train, y_train, cat_features=categorical_features_indices)
+scores = cv(pool, model.get_params(), fold_count=5, shuffle=True, partition_random_seed=0, plot=True, stratified=False, verbose=False)
+best_value = np.min(scores['test-Logloss-mean'])
+best_iter = np.argmin(scores['test-Logloss-mean'])
+
+# results
 results = pd.DataFrame()
-results['koer'] = test['koer']
-results['kohtunik'] = test['kohtunik']
-results['grade'] = model.predict(test)
+results['koer'] = X_test['koer']
+results['kohtunik'] = X_test['kohtunik']
+results['grade'] = model.predict(X_test)
 results['grade'] = results['grade'].round() # round values to integers
 #results.to_csv("predicted_results.csv")
 results = results.sort_values('kohtunik', ascending=False).reset_index(drop=True)
 kohtunikuheldus = results.groupby(['kohtunik', 'koer'])['grade'].sum().reset_index().groupby('kohtunik').mean()
 
-""" Cross validation"""
-"""from sklearn.cross_validation import cross_val_score, cross_val_predict
-from sklearn import metrics
-scores = cross_val_score(model, df_cb, y, cv=6) # change cv for different number of folds
-print ('Cross-validated scores:', scores)
-predictions = cross_val_predict(model, df_cb, y, cv=6) # Make cross validated predictions
-accuracy = metrics.r2_score(y, predictions)
-print ('Cross-Predicted Accuracy:', accuracy)"""
-
-
-from sklearn.model_selection import KFold
-# Set up folds
-K = 5
-kf = KFold(n_splits = K, random_state = 1, shuffle = True)
-
-# Run CV
-
-for i, (train_index, test_index) in enumerate(kf.split(train)):
-    
-    # Create data for this fold
-    y_train, y_valid = y.iloc[train_index], y.iloc[test_index]
-    X_train, X_valid = X.iloc[train_index,:], X.iloc[test_index,:]
-    print( "\nFold ", i)
-    
-    # Run model for this fold
-    fit_model = model.fit( X_train, y_train )
-        
-    # Generate validation predictions for this fold
-    pred = fit_model.predict_proba(X_valid)[:,1]
-    print( "  Gini = ", eval_gini(y_valid, pred) )
-    y_valid_pred.iloc[test_index] = pred
-    
-    # Accumulate test set predictions
-    y_test_pred += fit_model.predict_proba(X_test)[:,1]
-    
-y_test_pred /= K  # Average test set predictions
-print( "\nGini for full training set:" )
-#eval_gini(y, y_valid_pred)
-
-
 """Vizualisation"""
 # Categorical data vizualisation with seaborn
-df_v = df[df.groupby('kohtunik').kohtunik.transform(len) > 30] # select only most frequent judges for plot
+"""df_v = df[df.groupby('kohtunik').kohtunik.transform(len) > 30] # select only most frequent judges for plot
 sns.set(style="ticks", color_codes=True)
 sns.catplot(x='kohtunik', y='grade', data=df_v, jitter=True);
 
@@ -219,7 +183,7 @@ plt.show()
 df_exp = pd.DataFrame()
 df_exp['koer'] = df['koer']
 df_exp['grade'] = df['grade']
-df_exp.to_csv("data.csv", index=False)
+df_exp.to_csv("data.csv", index=False)"""
 
 """ Below is version for KModes clustering
 
@@ -239,7 +203,6 @@ df_ml["koerakood"] = le.fit_transform(df_ml["koer"])
 
 # make new dataframe for clustering
 df_ml = df.loc[:, ['koer', 'kohtunik', 'grade']]
-df_ml['koer'] = df_ml['koer'].str.replace('LŠVK ', 'LŠVK').str.replace('-','').str.replace('/','').str.replace('.','').str.split(' ').str[0]
 #df_ml = pd.get_dummies(data=df_ml, columns=['koer'])
 df_ml["koer"] = df_ml["koer"].astype('category')
 df_ml["kohtunik"] = df_ml["kohtunik"].astype('category')
